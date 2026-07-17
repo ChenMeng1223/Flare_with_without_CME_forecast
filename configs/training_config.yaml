@@ -1,0 +1,87 @@
+# 训练配置
+training:
+  # 基础配置
+  batch_size: 1
+  epochs: 150
+  learning_rate: 1e-4
+  weight_decay: 1e-5
+  gradient_clip: 1.0
+  accumulation_steps: 4    # 梯度累积步数，相当于batch_size=4
+  use_mixed_precision: false  # 先关闭混合精度，排查 proposal 阶段数值不稳定
+
+  # 优化器
+  optimizer:
+    type: "adamw"  # adam, adamw, sgd
+    betas: [0.9, 0.999]
+    eps: 1e-8
+
+  # 学习率调度
+  scheduler:
+    type: "plateau"  # cosine, step, plateau
+    warmup_epochs: 5
+    min_lr: 1e-6
+    step_size: 10
+    gamma: 0.5
+
+  # 损失函数权重
+  loss_weights:
+    classification: 1.0
+    bbox_regression: 2
+    bbox_refine: 1.0
+    time_prediction: 0.0
+    physics_constraint: 0.1
+    event_probability: 0.5
+
+  # 分类平衡
+  balance:
+    auto_class_weights: true   # 根据训练集 1/2 类槽位分布自动生成 class_weights
+    sampler:
+      power: 0.5               # 采样强度，1.0=完全按槽位类频率反比；可调小到 0.5 做温和重采样
+      min_weight: 1e-6         # 不含 1/2 类槽位窗口的最小采样权重
+
+  # 分类损失的类别权重（用于CrossEntropyLoss），顺序为 [class0, class1, class2]
+  # 当 balance.auto_class_weights=true 时，训练时会自动覆盖为 [1.0, auto_w1, auto_w2]
+  # 0=无事件(padding/不参与)，1=爆发(eruptive/CME)，2=束缚(confined)
+  class_weights: [1.0, 1.0, 5.0]
+
+  # 训练前 bbox 可视化检查
+  bbox_sanity_check:
+    enabled: true
+    samples_per_split: 4
+    seed: 42
+
+  # 两阶段训练调度（减少 train/val ROI 分布差异，优先让第二阶段适应预测框）
+  two_stage_schedule:
+    enabled: true
+    roi_source_mix: # 训练时，模型使用的 ROI（感兴趣区域 / 候选框） 来源混合比例
+      gt: 0.0
+      jittered_gt: 0.0
+      predicted: 1.0
+
+  # 早停
+  early_stopping:
+    patience: 80  # 增加到60个epoch，给模型更多时间稳定收敛
+    min_delta: 0.001  # 降低改善阈值，更容易判定为"有改善"
+    mode: "max"  # 监控综合验证指标，越大越好
+    restore_best_weights: true
+
+  # 检查点
+  checkpoint:
+    save_frequency: 5  # 第30个epoch前按频率保存
+    save_every_epoch_start: 30  # 从第30个epoch开始每个epoch都保存一次
+    save_best_only: false
+    max_checkpoints: 10
+    save_dir: "outputs/checkpoints"  # 检查点保存目录，绝对路径或相对项目根目录
+
+  # 分布式训练
+  distributed:
+    enabled: false
+    num_gpus: 4
+    backend: "nccl"
+
+  # 日志
+  logging:
+    log_dir: "logs"
+    log_frequency: 10  # 每10个batch记录一次
+    tensorboard: true
+    wandb: True

@@ -1,0 +1,49 @@
+model:
+  type: "multimodal_transformer"
+  input_size: [512, 512]
+  sequence_length: 9
+  num_classes: 3
+  max_activities: 5
+  use_physical_constraints: true
+
+  spatial:
+    encoder_downsample_factor: 4
+
+  transformer:
+    hidden_dim: 256
+    num_heads: 4
+    num_layers: 3
+    dropout: 0.1
+    feedforward_dim: 1024
+
+  cnn:
+    backbone: "resnet50"
+    pretrained: true
+    freeze_backbone: false
+
+  fusion:
+    method: "attention"
+    attention_dim: 256
+    num_fusion_layers: 2
+
+  stage2:
+    enabled: true
+    context_scale: 2.0
+    use_global_feature: true
+    use_proposal_feature: true
+
+  prediction_heads:
+    time:
+      enabled: false
+      offset_range_days: 2.0
+      max_duration_hours: 1.0
+    bbox:
+      refine_center_scale: 0.15
+      refine_size_log_scale: 0.35
+      proposal_init_size_bias: -2.2
+
+  physics:
+    magnetic_energy_weight: 0.1
+    helicity_weight: 0.05
+    energy_balance_weight: 0.1
+    enabled_constraints: ["magnetic_energy", "helicity"]

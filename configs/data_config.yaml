@@ -1,0 +1,123 @@
+# 数据配置
+data:
+  # 事件数据文件路径
+  events_file: "D:/ChenMeng/Graduate_Student/Experiment_and_Data/Flare_with_without_CME_forecast/data/raw/events_training.xlsx"
+
+  # HDF5文件路径
+  hdf5_path: "data/Solar_Flares_CME_dataset.h5"
+  raw_data_dir: "data/raw"
+  processed_data_dir: "data/processed"
+  numeric_cache_dir: "data/processed_arrays"
+  hdf5_image_source: "fits_cache"  # fits_cache: FITS -> float32 .npy cache -> HDF5; processed_png: legacy PNG -> HDF5
+
+  # 模态配置
+  modalities:
+    magnetogram:
+      enabled: true
+      channels: 1
+      resolution: [256, 256]
+      wavelength: 6173.0  # Å
+      unit: "Gauss"
+      instrument: "SDO/HMI"
+      normalization: [-2000, 2000]
+      required: true
+      cadence: "720s"  # 大采样间隔，用于事件组生成, 通常与cadence_minutes一致
+      # 可选参数：指定要下载的HMI产品系列，可为'hmi.M_720s'或'hmi.M_45s'
+      series: "hmi.M_720s"  # 12分钟磁图；45s产品可改为 'hmi.M_45s'
+
+    euv_94:
+      enabled: true
+      channels: 1
+      resolution: [256, 256]
+      wavelength: 94.0
+      unit: "DN/s"
+      instrument: "SDO/AIA"
+      normalization: [0, 50000]
+      required: true
+      cadence: "12s"  # AIA数据通常是12s间隔
+
+    euv_171:
+      enabled: true
+      channels: 1
+      resolution: [256, 256]
+      wavelength: 171.0
+      unit: "DN/s"
+      instrument: "SDO/AIA"
+      normalization: [0, 30000]
+      required: true
+      cadence: "12s"
+
+    euv_193:
+      enabled: true
+      channels: 1
+      resolution: [256, 256]
+      wavelength: 193.0
+      unit: "DN/s"
+      instrument: "SDO/AIA"
+      normalization: [0, 40000]
+      required: false
+      cadence: "12s"
+
+    euv_304:
+      enabled: false  # 是否参与训练
+      channels: 1
+      resolution: [256, 256]
+      wavelength: 304.0
+      unit: "DN/s"
+      instrument: "SDO/AIA"
+      normalization: [0, 30000]
+      required: false
+      cadence: "12s"
+
+    halpha:
+      enabled: true
+      channels: 1
+      resolution: [256, 256]
+      wavelength: 6562.8
+      unit: "counts"
+      instrument: "CHASE/Hα"
+      normalization: [0, 255]
+      required: false
+      cadence: "1200s"    #实际的Hα数据是60s间隔，但由于数据缺失，在下载时使用更大的cadence来确保每个事件能有一定的图像数据
+      url_file: "D:/ChenMeng/Graduate_Student/Experiment_and_Data/Flare_with_without_CME_forecast/data/raw/Halpha_download.txt"
+
+  # 时间配置
+  time:
+    pre_event_hours: 6        # 事件前扩展小时数（以start_time为基准向前扩展）
+    post_event_hours: 3       # 事件后扩展小时数（以start_time为基准向后扩展）
+    cadence_minutes: 60       # 数据采样间隔(分钟)（用于数据创建）
+    # 注意：统一以start_time为基准，确保所有事件的帧数一致
+    # 实际帧数 = (pre_event_hours + post_event_hours) * 60 / cadence_minutes
+    # 例如：pre=6h, post=3h, cadence=30min，则 (6+3)*60/30 = 18帧
+    # 这样所有事件的帧数都相同，不依赖事件的持续时间
+  # 数据集配置
+  max_activities: 5  # 每个事件的最大活动数
+  sequence_length: 9       # 训练时的滑动窗口长度(帧) - 减少以节省显存
+  forecast_horizon: 3       # 预测未来小时数，原为24
+
+  runtime:
+    hdf5_locking: false     # Windows 多进程读取 HDF5 时建议关闭，避免 unable to lock file
+
+# # 扩展到前后若干小时（测试模式：缩短以减少数据量）
+# # 在生产环境中可改为 pre_hours=24, post_hours=12, cadence_minutes=12
+# pre_hours = 6   # 原为24
+# post_hours = 3  # 原为12
+# cadence_minutes = 30  # 原为12
+
+  # 划分结果输出目录（训练时从此处读取）
+  split_data_dir: "data/split_data"
+
+  # 数据划分
+  splits:
+    split_method: "temporal"  # "temporal": 按时间先后划分(降低泄露); "random": 随机/分层抽样
+    train_ratio: 0.7
+    val_ratio: 0.2
+    test_ratio: 0.1
+    random_seed: 42
+
+  # 预处理配置
+  preprocessing:
+    handle_missing: "nearest"  # nearest: 用时间最近的文件; zero_fill: 超出阈值则填0; "interpolate": 线性插值
+    interpolation_order: 1
+    cache_processed: true
+    num_workers: 4

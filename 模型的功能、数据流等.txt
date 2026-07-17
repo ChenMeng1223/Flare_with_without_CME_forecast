@@ -1,0 +1,921 @@
+可以，我给你按“数据集 → 训练 → 推理 → 后处理 → 导出/可视化/评估”这条线，尽量完整地把这个模型现在到底在做什么讲清楚。
+
+你现在感觉“混乱”，本质上是因为这个项目里同时存在这几层概念，而且它们名字很像：
+
+1. **事件 event**
+2. **滑动窗口 window**
+3. **活动槽位 slot / max_activities**
+4. **proposal / refined bbox / detection**
+5. **训练时的 GT 槽位**
+6. **推理后的最终保留 detection**
+
+这些东西如果不分开看，就很容易乱。
+
+---
+
+# 一、先讲最核心的对象：event、window、slot、detection
+
+## 1) event
+一个 `event_id` 是一个完整太阳事件序列。
+
+例如一个事件可能有很多帧图像。
+
+## 2) window
+模型不是一次看整个 event，而是把 event 切成很多滑动窗口。
+
+在 `SolarFlareDataset` 里是这样生成的：
+
+```84:116:d:\ChenMeng\Graduate_Student\Experiment_and_Data\Flare_with_without_CME_forecast\data\dataset.py
+        for event_id in self.event_ids:
+            ...
+            for start_idx in range(0, num_frames - self.sequence_length + 1, self.stride):
+                end_idx = start_idx + self.sequence_length
+
+                window_info = {
+                    'event_id': event_id,
+                    'start_idx': start_idx,
+                    'end_idx': end_idx,
+                    'window_id': f"{event_id}_{start_idx}_{end_idx}"
+                }
+                windows.append(window_info)
+```
+
+也就是说：
+
+- 一个 `event`
+- 会变成很多个 `window`
+- 每个 `window` 是一个训练/推理样本
+
+---
+
+## 3) slot
+每个 window 内，不是只预测“有没有事件”，而是最多预测 `max_activities` 个活动槽位。
+
+在数据集里，标签会被补齐到固定长度：
+
+```183:205:d:\ChenMeng\Graduate_Student\Experiment_and_Data\Flare_with_without_CME_forecast\data\dataset.py
+        max_activities = self.max_activities
+
+        padded_labels = labels + [0] * (max_activities - len(labels))
+        padded_labels = padded_labels[:max_activities]
+
+        padded_bboxes = bboxes + [[0, 0, 0, 0]] * (max_activities - len(bboxes))
+        padded_bboxes = padded_bboxes[:max_activities]
+
+        activity_mask = [1] * len(labels) + [0] * (max_activities - len(labels))
+        activity_mask = activity_mask[:max_activities]
+
+        padded_time_features = time_features + [[0.0, 0.0, 1.0]] * (max_activities - len(time_features))
+        padded_time_features = padded_time_features[:max_activities]
+```
+
+所以一个 window 最终总是有固定数量的槽位，比如 `max_activities=5` 时：
+
+- slot 0
+- slot 1
+- slot 2
+- slot 3
+- slot 4
+
+但不是每个 slot 都是真实事件。
+
+### `activity_mask`
+就是用来区分：
+- 哪些 slot 真的有标注
+- 哪些只是 padding
+
+---
+
+## 4) detection
+推理后，模型先对每个 slot 预测一份结果；然后经过筛选、NMS、merge，最终保留下来的框，叫 **detection**。
+
+所以：
+
+- **slot** 是模型固定输出位
+- **detection** 是后处理之后真正保留下来的结果
+
+一个重要事实：
+
+> slot 数量固定，detection 数量不固定。
+
+例如：
+- 5 个 slot 都出预测
+- 最后只保留 2 个 detection
+
+---
+
+# 二、数据集到底给模型喂了什么
+
+`__getitem__` 返回的一个样本主要有这些东西：
+
+```206:220:d:\ChenMeng\Graduate_Student\Experiment_and_Data\Flare_with_without_CME_forecast\data\dataset.py
+        sample = {
+            'data': data_dict,
+            'label': torch.tensor(padded_labels, dtype=torch.long),
+            'bbox': torch.FloatTensor(padded_bboxes),
+            'activity_mask': torch.tensor(activity_mask, dtype=torch.bool),
+            'time_features': torch.FloatTensor(padded_time_features),
+            'auxiliary': _to_fixed_auxiliary(auxiliary),
+            'metadata': {
+                'window_id': window_info['window_id'],
+                'event_id': event_id,
+                'start_idx': start_idx,
+                'end_idx': end_idx,
+                ...
+            }
+        }
+```
+
+对应含义：
+
+- `data`: 多模态图像序列
+- `label`: 每个 slot 的类别
+- `bbox`: 每个 slot 的 GT 框
+- `activity_mask`: 哪些 slot 有效
+- `time_features`: 每个 slot 的时间标签
+- `metadata`: 这个 window 对应哪个 event、起止帧等
+
+---
+
+## `label` 的含义
+你这里约定是：
+
+- `0` = 无事件 / padding
+- `1` = eruptive / CME
+- `2` = confined
+
+注意：
+
+> 训练分类损失时，真正参与分类的是 `1/2`，不是 `0/1/2` 全三类一起公平分类。
+
+后面我会讲。
+
+---
+
+## `time_features` 的含义
+现在已经统一成：
+
+- `start_offset`
+- `end_offset`
+- `duration`
+
+在 `_get_time_features()` 里构造：
+
+```d:\ChenMeng\Graduate_Student\Experiment_and_Data\Flare_with_without_CME_forecast\data\dataset.py
+[ start_offset_days, end_offset_days, duration_days ]
+```
+
+你前面遇到的时间错乱，本质就是这里和模型输出曾经不一致。
+
+---
+
+# 三、模型 forward 时到底生成了什么
+
+你的模型大体是“两阶段”：
+
+1. 先从整段时空特征里生成 proposal
+2. 再对每个 proposal 做分类、时间预测、bbox refine
+
+---
+
+## 1) 多模态编码
+每个模态先过一个空间编码器，得到时序空间特征图。
+
+`SpatialModalityEncoder` 输入大致是：
+
+- `(B, T, C, H, W)` 或 `(B, T, H, W)`
+
+输出是：
+
+- `(B, T, hidden_dim, H', W')`
+
+---
+
+## 2) 多模态融合 + 时间编码
+在 `MultimodalSpatiotemporalFusion` 里：
+
+- 先把每个模态做池化
+- 跨模态 attention 融合
+- 再过 temporal transformer
+- 输出全局时空特征
+
+主要输出：
+
+- `fused_maps`
+- `temporal_features`
+- `global_feature`
+
+---
+
+## 3) ProposalDecoder：生成第一阶段 proposal
+proposal decoder 从整个时空 token 里，用固定数量 query 读出 proposal。
+
+这里的 query 数量就是 `max_activities`。
+
+```171:196:d:\ChenMeng\Graduate_Student\Experiment_and_Data\Flare_with_without_CME_forecast\models\multimodal_transformer.py
+        queries = self.query_embed.unsqueeze(0).expand(bsz, -1, -1)
+        attended, _ = self.attn(queries, spatial_temporal_tokens, spatial_temporal_tokens)
+        ...
+        proposal_scores = self.score_head(proposal_features)
+        box_raw = self.box_head(proposal_features)
+        ...
+        proposal_boxes = torch.cat([
+            torch.clamp(center - half, 0.0, 1.0),
+            torch.clamp(center + half, 0.0, 1.0),
+        ], dim=-1)
+```
+
+这一阶段已经产生：
+
+- `proposal_boxes`
+- `proposal_scores`
+- `proposal_features`
+
+它们都是 **slot 对齐** 的。
+
+也就是：
+- 第 0 个 query → slot 0
+- 第 1 个 query → slot 1
+- ...
+
+---
+
+## 4) ROI 特征提取
+然后模型会围绕每个 proposal box，从 `fused_maps` 里截取 ROI 特征。
+
+也会提取 context ROI。
+
+这些 ROI 再做时间编码，得到每个 slot 的局部时序特征。
+
+---
+
+## 5) StageTwoPredictor：第二阶段预测
+这是最关键的头。
+
+它对每个 slot 输出：
+
+- `class_logits`
+- `class_probs`
+- `event_prob`
+- `time_pred`
+- `bbox_pred`
+
+看 forward：
+
+```281:319:d:\ChenMeng\Graduate_Student\Experiment_and_Data\Flare_with_without_CME_forecast\models\multimodal_transformer.py
+        slot_features = self.fusion(torch.cat([local_feature, context_feature, proposal_feature, global_repeated, proposal_scores], dim=-1))
+        class_logits = self.classifier(slot_features)
+        event_logit = self.event_prob_predictor(slot_features)
+        event_gate = torch.sigmoid(event_logit)
+        time_outputs = self._predict_time(slot_features, local_sequence, context_sequence, event_gate)
+        ...
+        refined_boxes = torch.cat([
+            torch.clamp(refined_center - half, 0.0, 1.0),
+            torch.clamp(refined_center + half, 0.0, 1.0),
+        ], dim=-1)
+```
+
+所以第二阶段每个 slot 都会有：
+
+- 一个类别
+- 一个事件概率
+- 一个时间预测
+- 一个 refined bbox
+
+---
+
+# 四、时间预测到底是什么
+
+这个地方最容易乱，我单独讲。
+
+## 模型内部输出
+`_predict_time()` 最终返回的 `time_pred` 是：
+
+```245:252:d:\ChenMeng\Graduate_Student\Experiment_and_Data\Flare_with_without_CME_forecast\models\multimodal_transformer.py
+        start_time = center_time - 0.5 * duration_days
+        end_time = center_time + 0.5 * duration_days
+        legacy_time_pred = torch.cat([start_time, end_time, duration_days], dim=-1)
+```
+
+所以当前模型的 `time_pred` 语义是：
+
+- `time_pred[..., 0] = start`
+- `time_pred[..., 1] = end`
+- `time_pred[..., 2] = duration`
+
+单位是 **天**，不是小时。
+
+后处理时再乘 `24` 变小时。
+
+---
+
+# 五、训练时每个损失怎么对齐
+
+这部分是理解“槽位”最重要的地方。
+
+---
+
+## 1) 分类损失只在正样本槽位算
+训练器先构造：
+
+```180:192:d:\ChenMeng\Graduate_Student\Experiment_and_Data\Flare_with_without_CME_forecast\training\trainer.py
+        labels = targets['label']
+        slot_mask = targets.get('activity_mask', torch.ones_like(labels, dtype=torch.bool))
+        slot_labels = labels.clone()
+        slot_labels[~slot_mask] = 0
+        has_any_event = ((slot_labels > 0) & slot_mask).any(dim=1)
+```
+
+然后分类损失只对：
+
+- `slot_mask == True`
+- 且 `label > 0`
+
+的槽位算。
+
+```332:351:d:\ChenMeng\Graduate_Student\Experiment_and_Data\Flare_with_without_CME_forecast\training\trainer.py
+        positive_slot_mask = (slot_labels > 0) & slot_mask
+        if positive_slot_mask.any():
+            class_logits = outputs['class_logits'][..., 1:].reshape(-1, outputs['class_logits'].size(-1) - 1)
+            class_targets = (slot_labels - 1).view(-1)
+            class_mask = positive_slot_mask.view(-1)
+            selected_class_logits = class_logits[class_mask]
+            selected_class_targets = class_targets[class_mask]
+            class_loss = self.criterion['classification'](
+                selected_class_logits,
+                selected_class_targets
+            )
+```
+
+注意这里有两个关键点：
+
+### 点 A：只用正槽位
+padding 槽位不参与
+
+### 点 B：实际上做的是 1/2 二分类
+`class_logits[..., 1:]` 只取类别 1 和 2  
+所以类别 0 不是作为正常事件类别参与这个损失的。
+
+---
+
+## 2) proposal score 损失
+每个 slot 的 proposal score 监督目标是：
+
+- 正槽位 = 1
+- 其他 = 0
+
+```357:360:d:\ChenMeng\Graduate_Student\Experiment_and_Data\Flare_with_without_CME_forecast\training\trainer.py
+        proposal_score_logits = outputs.get('proposal_scores', outputs['event_prob']).squeeze(-1)
+        proposal_targets = positive_slot_mask.float()
+        proposal_score_loss = self.criterion['proposal_score'](proposal_score_logits, proposal_targets)
+```
+
+---
+
+## 3) bbox 损失
+bbox 只在正槽位上算。
+
+而且分两层：
+
+- 第一阶段 `proposal_boxes` 对 GT
+- 第二阶段 `bbox_pred` 对 GT
+
+```365:387:d:\ChenMeng\Graduate_Student\Experiment_and_Data\Flare_with_without_CME_forecast\training\trainer.py
+        if bbox_mask.any():
+            proposal_bbox_flat = outputs.get('proposal_boxes', outputs['bbox_pred']).view(-1, 4)
+            bbox_target_flat = targets['bbox'].view(-1, 4)
+            ...
+            proposal_bbox_l1_loss = self.criterion['bbox_l1'](selected_proposal_bbox, selected_bbox_target)
+            proposal_bbox_giou_loss = self._generalized_iou_loss(selected_proposal_bbox, selected_bbox_target)
+```
+
+```394:411:d:\ChenMeng\Graduate_Student\Experiment_and_Data\Flare_with_without_CME_forecast\training\trainer.py
+        if bbox_mask.any():
+            refined_bbox_flat = outputs['bbox_pred'].view(-1, 4)
+            bbox_target_flat = targets['bbox'].view(-1, 4)
+            ...
+            bbox_l1_loss = self.criterion['bbox_l1'](selected_refined_bbox, selected_bbox_target)
+            bbox_giou_loss = self._generalized_iou_loss(selected_refined_bbox, selected_bbox_target)
+```
+
+所以训练时默认假设：
+
+> 第 \(k\) 个输出 slot，对应第 \(k\) 个 GT 槽位。
+
+这里并没有 Hungarian matching 之类的显式匹配机制，基本是“位置对位置”。
+
+这也是这个系统容易乱的源头之一。
+
+---
+
+## 4) 时间损失
+时间也只在正槽位上算：
+
+```418:447:d:\ChenMeng\Graduate_Student\Experiment_and_Data\Flare_with_without_CME_forecast\training\trainer.py
+        if time_mask.any():
+            time_target_flat = targets['time_features'].reshape(-1, 3)
+            ...
+            selected_time_pred = outputs['time_pred'].reshape(-1, 3)[time_mask_flat]
+            ...
+            target_start = selected_time_target[..., 0:1]
+            target_end = selected_time_target[..., 1:2]
+            target_duration = selected_time_target[..., 2:3].clamp(min=1e-3)
+            target_center = 0.5 * (target_start + target_end)
+            ...
+            boundary_loss = self.criterion['time'](selected_time_pred, selected_time_target)
+```
+
+它不是只直接比 `[start,end,duration]`，还额外比了：
+
+- center
+- log duration
+- 边界值
+
+最后组合成总时间损失。
+
+---
+
+## 5) event_prob 损失
+也是按槽位监督：
+
+- 有真实事件的槽位 = 1
+- 否则 = 0
+
+```455:460:d:\ChenMeng\Graduate_Student\Experiment_and_Data\Flare_with_without_CME_forecast\training\trainer.py
+        event_prob_targets = bbox_mask.float()
+        event_prob_loss = self.criterion['event_prob'](
+            outputs['event_prob'].squeeze(-1),
+            event_prob_targets
+        )
+```
+
+---
+
+## 6) 负槽位抑制损失
+这个很关键，但经常被忽略。
+
+对于无事件槽位，训练器会额外要求：
+
+- bbox 尺寸尽量缩到 0
+- duration 尽量短
+
+```463:492:d:\ChenMeng\Graduate_Student\Experiment_and_Data\Flare_with_without_CME_forecast\training\trainer.py
+        negative_slot_mask = slot_mask & (~positive_slot_mask)
+        if negative_slot_mask.any():
+            ...
+            bbox_suppression_loss = self.criterion['suppression'](
+                neg_bbox_size,
+                torch.zeros_like(neg_bbox_size)
+            )
+            ...
+            time_suppression_loss = self.criterion['time_duration'](
+                torch.log(neg_time_duration.clamp(min=1e-3)),
+                torch.log(time_suppression_target)
+            )
+```
+
+这意味着：
+- 无事件 slot 不只是“不参与正样本监督”
+- 还会被主动训练成“输出很小框、很短时间”
+
+---
+
+# 六、推理时具体发生了什么
+
+推理入口是 `predict_batch()`。
+
+## 第一步：模型原始输出
+标准推理时先跑：
+
+```191:205:d:\ChenMeng\Graduate_Student\Experiment_and_Data\Flare_with_without_CME_forecast\inference\predictor.py
+                outputs = self.model(inputs)
+
+                predictions = {
+                    'class_probs_mean': outputs['class_probs'],
+                    'bbox_pred_mean': outputs.get('bbox_pred'),
+                    'time_pred_mean': outputs['time_pred'],
+                    'event_prob_mean': outputs['event_prob'],
+                    'event_gate_mean': outputs.get('event_gate'),
+                    'proposal_boxes': outputs.get('proposal_boxes', outputs['bbox_pred']),
+                    'context_boxes': outputs.get('context_boxes'),
+                    'proposal_scores': outputs.get('proposal_scores', outputs['event_prob']),
+                    'proposal_features': outputs.get('proposal_features'),
+```
+
+所以原始预测字典里主要是：
+
+- `class_probs_mean`
+- `bbox_pred_mean`
+- `time_pred_mean`
+- `event_prob_mean`
+- `proposal_boxes`
+- `proposal_scores`
+- `context_boxes`
+
+此时它们大多还是 **按 slot 排列** 的。
+
+---
+
+## 第二步：后处理 `process()`
+后处理的顺序是：
+
+```47:54:d:\ChenMeng\Graduate_Student\Experiment_and_Data\Flare_with_without_CME_forecast\inference\post_processing.py
+    def process(self, predictions: Dict[str, Any]) -> Dict[str, Any]:
+        out = predictions.copy()
+        out = self._squeeze_batch_outputs(out)
+        out = self._process_classification(out)
+        out = self._process_time_predictions(out)
+        out = self._process_event_probability(out)
+        out = self._process_bboxes(out)
+        out = self._apply_consistency_checks(out)
+```
+
+---
+
+## 2.1 分类后处理
+把每个 slot 的概率转成最终类，并记下置信度。
+
+```83:109:d:\ChenMeng\Graduate_Student\Experiment_and_Data\Flare_with_without_CME_forecast\inference\post_processing.py
+        for slot_probs in probs:
+            ...
+            final_class = self._apply_class_thresholds(slot_probs)
+            processed.append(slot_probs)
+            final_classes.append(final_class)
+            confs.append(float(slot_probs[final_class].item()) if slot_probs.numel() > final_class else 0.0)
+        predictions['processed_class_probs'] = torch.stack(processed) if processed else torch.empty((0, 3))
+        predictions['final_classes'] = torch.tensor(final_classes, dtype=torch.long)
+```
+
+这里的 `final_classes` 仍然是 **slot 级**。
+
+---
+
+## 2.2 时间后处理
+把模型的 day 单位转成 hour，并约束合法性。
+
+现在语义是：
+
+- start_hours
+- end_hours
+- duration_hours
+
+---
+
+## 2.3 event probability 后处理
+把 logits 过 sigmoid，得到 slot 级事件概率。
+
+---
+
+## 2.4 bbox 后处理：最复杂的部分
+这里才真正从“slot 输出”变成“最终 detection”。
+
+处理逻辑大致是：
+
+### 对每个 slot：
+1. 修正 bbox 合法性
+2. 读这个 slot 的：
+   - class
+   - class_conf
+   - proposal_score
+   - event_prob
+   - time
+3. 用阈值筛掉明显差的 slot
+4. 保留候选
+
+这段核心代码是：
+
+```171:231:d:\ChenMeng\Graduate_Student\Experiment_and_Data\Flare_with_without_CME_forecast\inference\post_processing.py
+        for i in range(bbox_pred.shape[1]):
+            refined_bbox = self._clip_and_validate_bbox(bbox_pred[0, i])
+            ...
+            slot_class = 0
+            if pred_classes is not None and len(pred_classes) > i:
+                slot_class = int(pred_classes[i].item() if hasattr(pred_classes[i], 'item') else pred_classes[i])
+            ...
+            if refined_bbox is None or slot_class == 0 or (not gated_size_valid):
+                continue
+            if slot_conf < min_cls_conf or event_prob < min_event_prob or proposal_conf < min_proposal_score:
+                continue
+            ...
+            candidate_detections.append({
+                'slot_id': i,
+                'bbox': refined_bbox,
+                'class_id': slot_class,
+                ...
+            })
+```
+
+### 然后对候选做：
+- 排序
+- NMS
+- merge
+
+```233:248:d:\ChenMeng\Graduate_Student\Experiment_and_Data\Flare_with_without_CME_forecast\inference\post_processing.py
+        candidate_detections.sort(
+            key=lambda det: (det['event_probability'] + det['class_confidence'] + det['proposal_score']),
+            reverse=True,
+        )
+
+        if candidate_detections:
+            ...
+            keep = self._non_max_suppression(...)
+            candidate_detections = [candidate_detections[idx] for idx in keep]
+```
+
+### merge 的意思
+如果两个候选框 IoU 太高，就把它们合并成一个 detection，但把相关信息保存在 `linked_events` 里。
+
+---
+
+## 后处理输出的关键字段
+经过 `_process_bboxes()` 后，预测字典里最重要的是：
+
+- `processed_bboxes`: 最终保留框，按 detection 顺序
+- `final_classes`: 最终 detection 的类别，按 detection 顺序
+- `classification_confidences`
+- `processed_event_probs`
+- `processed_time_pred`
+- `kept_bbox_slot_indices`: 这些 detection 原来来自哪个 slot
+- `linked_events`: merge 时合并进来的关联事件
+
+这一点很关键：
+
+> 后处理之后的这些字段，已经不再是原始 slot 顺序，而是“最终 detection 顺序”。
+
+---
+
+# 七、`slot_id` 和 `detection_idx` 的关系
+
+这是你现在最需要分清的地方。
+
+## `slot_id`
+表示这个最终 detection 最初来自哪个固定输出槽位。
+
+例如：
+- detection 0 来自 slot 3
+- detection 1 来自 slot 1
+
+## `detection_idx`
+表示后处理之后第几个保留框。
+
+例如：
+- `detection_idx=0`
+- `detection_idx=1`
+
+在 `_build_detections()` 里是这么构造的：
+
+```58:97:d:\ChenMeng\Graduate_Student\Experiment_and_Data\Flare_with_without_CME_forecast\inference\predictor.py
+        for det_idx, slot_idx in enumerate(kept_slot_indices.tolist()):
+            class_id = int(slot_classes[det_idx]) if det_idx < len(slot_classes) else -1
+            ...
+            det: Dict[str, Any] = {
+                'detection_idx': int(det_idx),
+                'slot_id': int(slot_idx),
+                'class_id': class_id,
+                ...
+            }
+```
+
+所以：
+
+- `slot_id` = 原始 query / 原始活动槽位编号
+- `detection_idx` = 后处理保留下来之后的编号
+
+---
+
+# 八、导出文件分别在写什么
+
+## 1) `predictions.json`
+保存完整预测字典。
+
+## 2) `predictions_slots_detailed.csv`
+它现在读的是 `pred['detections']`：
+
+```151:176:d:\ChenMeng\Graduate_Student\Experiment_and_Data\Flare_with_without_CME_forecast\scripts\g_inference_pipeline.py
+def _prediction_to_slot_rows(pred: Dict[str, Any]) -> List[Dict[str, Any]]:
+    ...
+    detections = pred.get('detections', []) or []
+    ...
+    for det_idx, det in enumerate(detections):
+        if int(det.get('class_id', -1)) == 0:
+            continue
+```
+
+所以这张表是 **最终保留 detection 表**，不是原始 5 个 slot 的全量输出表。
+
+里面每行代表一个最终画出来的检测目标。
+
+字段关系：
+
+- `slot_id`: 原始来自哪个 slot
+- `detection_idx`: 最终第几个框
+- `bbox`: 最终画的框
+- `proposal_bbox`: 第一阶段 proposal
+- `context_bbox`: 上下文框
+- `linked_events`: 合并过来的其他候选
+
+---
+
+## 3) 单窗口汇总表
+`_prediction_to_row()` 里写的是窗口级汇总信息。
+
+它里面的：
+- `bbox_count`
+- `bboxes`
+- `slot_final_classes`
+
+不一定像 slot_detailed 那样直观。
+
+---
+
+# 九、为什么 test 集统计会让人感觉怪
+
+因为当前 test 评估不是“按 event 一个标签”，而是：
+
+> **按 window 内的 activity slot 逐个评估**
+
+这个函数名字已经写明了：
+
+```372:377:d:\ChenMeng\Graduate_Student\Experiment_and_Data\Flare_with_without_CME_forecast\scripts\g_inference_pipeline.py
+def _compute_test_set_classification_metrics(
+    ...
+) -> Tuple[Dict[str, Any], int]:
+    """
+    与训练/验证时一致：按 activity 槽位逐一比较 final_classes[k] 与 HDF5 标签。
+```
+
+所以 test 指标统计的是：
+
+- 所有 event
+- 所有生成的 window
+- 每个 window 的有效 GT slot
+
+这不是事件级，也不是窗口级二分类。
+
+而是 **slot 级分类评估**。
+
+---
+
+# 十、为什么你会感觉“训练过程和测试过程都很混乱”
+
+因为这个项目现在实际上同时混着三种“层级”：
+
+## 层级 A：GT 槽位层
+训练标签来自固定长度 slot：
+
+- `label[k]`
+- `bbox[k]`
+- `time_features[k]`
+- `activity_mask[k]`
+
+## 层级 B：模型输出槽位层
+模型也固定输出 `max_activities` 个 slot：
+
+- `class_probs[k]`
+- `proposal_boxes[k]`
+- `bbox_pred[k]`
+- `time_pred[k]`
+
+## 层级 C：推理后 detection 层
+后处理会把 slot 压缩成不定长 detection：
+
+- 可能 5 个 slot → 2 个 detection
+- 也可能 5 个 slot → 0 个 detection
+
+而你现在看到的各种文件：
+- 有的写 slot 层
+- 有的写 detection 层
+- 有的写 window 层
+- 有的又拿这些层混着做统计
+
+这就是混乱感的来源。
+
+---
+
+# 十一、当前最推荐你脑中建立的“统一理解模型”
+
+你可以把整个系统理解成下面这条链：
+
+## 训练时
+1. 一个 `event`
+2. 切成很多 `window`
+3. 每个 `window` 补齐成固定 `max_activities` 个 GT slot
+4. 模型输出固定 `max_activities` 个预测 slot
+5. 损失按 slot 对 slot 计算
+6. 正槽位学分类/bbox/time
+7. 负槽位学 suppression
+
+---
+
+## 推理时
+1. 一个 `event`
+2. 切成很多 `window`
+3. 每个 window 输出固定 `max_activities` 个预测 slot
+4. 后处理按阈值筛掉一部分 slot
+5. NMS / merge 后得到最终 detection
+6. 导出、可视化、detailed 应该都读这个 detection 层
+
+---
+
+# 十二、你现在最该关注的几个字段
+
+如果你想真正读懂一条预测，我建议按这个顺序看：
+
+## 对一个 `pred` 来说
+
+### 先看 window 身份
+- `pred['metadata']['event_id']`
+- `pred['metadata']['window_start_idx']`
+- `pred['metadata']['window_end_idx']`
+
+### 再看原始 slot 输出
+- `final_classes`
+- `classification_confidences`
+- `processed_event_probs`
+- `processed_time_pred`
+- `processed_bboxes`
+- `kept_bbox_slot_indices`
+
+### 再看最终 detection
+- `detections`
+
+其中 `detections` 是你最适合直接看的最终结果。
+
+---
+
+# 十三、如果你想彻底不混乱，下一步应该怎么改
+
+如果从工程角度，我建议最终统一成这三张“标准表”：
+
+## 表 1：window_summary
+每个 window 一行，回答：
+- 这个窗口预测到几个 detection
+- 最强类别是什么
+- 最大 event_prob 是多少
+
+## 表 2：slot_predictions
+每个 window 的每个固定 slot 一行，回答：
+- slot 0/1/2/3/4 各自输出了什么
+- 哪些是 padding
+- 哪些被后处理筛掉了
+
+## 表 3：final_detections
+每个最终 detection 一行，回答：
+- 这个框来自哪个 slot
+- bbox 是多少
+- class/time/prob 是多少
+- linked_events 有哪些
+
+这样你就能把：
+- 训练监督层
+- 原始模型输出层
+- 最终检测层
+
+彻底分开。
+
+---
+
+# 十四、我对你当前项目的一个判断
+
+你现在最大的“理解障碍”，不是模型结构本身太复杂，而是：
+
+> **缺一张“slot 到 detection 的映射表”**
+
+也就是每个窗口里，应该能清楚看到：
+
+- GT slot 0/1/2/3/4 是什么
+- 预测 slot 0/1/2/3/4 是什么
+- 哪些 slot 通过阈值
+- 哪些 slot 被 NMS 干掉
+- 最终留下哪些 detection
+
+没有这张表，就只能在 JSON/CSV/可视化之间来回猜。
+
+---
+
+如果你愿意，我下一步可以直接帮你做一个非常实用的东西：
+
+## 我可以新增一个“调试导出表”
+例如 `predictions_slots_debug.csv`，每一行就是一个 `window × slot`，包含：
+
+- `event_id`
+- `window_start_idx`
+- `slot_id`
+- `gt_label`
+- `gt_bbox`
+- `gt_time`
+- `activity_mask`
+- `pred_class_probs`
+- `final_class`
+- `class_confidence`
+- `proposal_score`
+- `event_probability`
+- `proposal_bbox`
+- `refined_bbox`
+- `kept_after_threshold`
+- `kept_after_nms`
+- `final_detection_idx`
+
+这样你一眼就能看出每个槽位从训练标签到最终检测结果的完整流转。
+
+如果你要，我下一条就直接开始给你加这张调试表。

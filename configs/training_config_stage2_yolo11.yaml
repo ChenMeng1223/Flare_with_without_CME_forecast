@@ -1,0 +1,72 @@
+training:
+  batch_size: 1
+  epochs: 150
+  learning_rate: 1e-4
+  weight_decay: 1e-5
+  gradient_clip: 1.0
+  accumulation_steps: 4
+  use_mixed_precision: false
+
+  optimizer:
+    type: "adamw"
+    betas: [0.9, 0.999]
+    eps: 1e-8
+
+  scheduler:
+    type: "plateau"
+    warmup_epochs: 5
+    min_lr: 1e-6
+    step_size: 10
+    gamma: 0.5
+
+  loss_weights:
+    classification: 1.0
+    bbox_regression: 2.0
+    bbox_refine: 1.0
+    time_prediction: 0.0
+    physics_constraint: 0.1
+    event_probability: 0.5
+
+  balance:
+    auto_class_weights: true
+    sampler:
+      power: 0.5
+      min_weight: 1e-6
+
+  class_weights: [1.0, 1.0, 5.0]
+
+  bbox_sanity_check:
+    enabled: true
+    samples_per_split: 4
+    seed: 42
+
+  two_stage_schedule:
+    enabled: true
+    roi_source_mix:
+      gt: 0.0
+      jittered_gt: 0.0
+      predicted: 1.0
+
+  early_stopping:
+    patience: 80
+    min_delta: 0.001
+    mode: "max"
+    restore_best_weights: true
+
+  checkpoint:
+    save_frequency: 5
+    save_every_epoch_start: 30
+    save_best_only: false
+    max_checkpoints: 10
+    save_dir: "outputs/checkpoints_stage2_yolo11"
+
+  distributed:
+    enabled: false
+    num_gpus: 1
+    backend: "nccl"
+
+  logging:
+    log_dir: "logs"
+    log_frequency: 10
+    tensorboard: true
+    wandb: true

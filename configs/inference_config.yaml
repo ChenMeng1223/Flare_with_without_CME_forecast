@@ -1,0 +1,105 @@
+# 推理配置
+inference:
+  # 预测窗口配置（应与训练时的 sequence_length / stride 保持一致）
+  windowing:
+    window_size: 9
+    stride: 1        # 与训练 data_config.yaml 中的 stride 保持一致；推理时若需加速可改为更大值，但会降低覆盖率
+    use_uncertainty: true
+    modalities: ['magnetogram', 'euv_94', 'euv_171', 'euv_193', 'halpha']
+
+  # 阈值配置
+  thresholds:
+    class0: 0.3  # 无事件
+    class1: 0.4  # 爆发耀斑（eruptive / CME-associated）
+    class2: 0.4  # 束缚耀斑（confined）
+
+  # 边界框处理
+  bbox_processing:
+    min_area: 10
+    max_area_ratio: 0.18
+    min_confidence: 0.35
+    min_event_probability: 0.40
+    min_proposal_score: 0.40
+    nms_threshold: 0.35
+    merge_iou_threshold: 0.60
+    max_detections: 6
+
+  # 时间预测处理
+  time_processing:
+    min_prediction_interval: 0.0167  # 小时，约 1 分钟
+    max_duration_hours: 1.5  # 持续时间上限，默认不超过 1 小时
+    max_prediction_horizon: 48.0  # 小时
+
+  # 警报阈值
+  alert_thresholds:
+    high_risk: 0.7  # 高风险阈值
+    medium_risk: 0.6  # 中风险阈值
+    low_risk: 0.3  # 低风险阈值
+
+# 不确定性估计配置
+uncertainty:
+  methods: ['mc_dropout']
+  mc_dropout:
+    num_samples: 10
+    dropout_enabled: true
+  ensemble:
+    num_models: 5
+    use_checkpoints: true
+  quantification:
+    confidence_level: 0.95
+    use_bootstrap: false
+
+# 模型配置（需与训练时一致）
+model:
+  type: 'multimodal_transformer'
+  input_size: [256, 256]
+  sequence_length: 9
+  num_classes: 3
+  max_activities: 5
+  use_physical_constraints: true
+
+  modalities:
+    magnetogram:
+      channels: 1
+    euv_94:
+      channels: 1
+    euv_171:
+      channels: 1
+    euv_193:
+      channels: 1
+    halpha:
+      channels: 1
+
+  transformer:
+    hidden_dim: 256
+    num_heads: 4
+    num_layers: 3
+    dropout: 0.1
+    feedforward_dim: 1024
+
+  # 两阶段配置（需与训练时一致；推理默认不做 GT mixing）
+  stage2:
+    context_scale: 2.0
+    roi_source_mix:
+      gt: 0.0
+      jittered_gt: 0.0
+      predicted: 1.0
+
+  physics:
+    magnetic_energy_weight: 0.1
+    helicity_weight: 0.05
+    energy_balance_weight: 0.1
+    enabled_constraints: ['magnetic_energy', 'helicity']
+
+# 输出配置
+output:
+  format: 'json'  # json, csv, parquet
+  include_uncertainty: true
+  include_visualizations: true
+  save_predictions: true
+  save_alerts: true
+
+# 日志配置
+logging:
+  level: 'INFO'
+  log_dir: 'logs/inference'

@@ -1,0 +1,53 @@
+# Local Python/runtime artifacts
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Virtual environments and local env files
+.venv/
+venv/
+env/
+*.env
+.env*
+
+# IDE/editor state
+.idea/
+.vscode/
+*.code-workspace
+
+# Large datasets and generated research artifacts
+data/
+outputs/
+runs/
+logs/
+wandb/
+
+# Model weights, checkpoints, and array/data caches
+*.pt
+*.pth
+*.ckpt
+*.onnx
+*.engine
+*.h5
+*.hdf5
+*.fits
+*.fit
+*.npy
+*.npz
+*.pkl
+*.joblib
+
+# Generated media and temporary files
+*.tmp
+*.temp
+*.log
+*.bak
+Thumbs.db
+.DS_Store
+
+# Office temporary lock files
+~$*

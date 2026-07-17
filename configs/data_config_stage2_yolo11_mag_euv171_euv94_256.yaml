@@ -1,0 +1,105 @@
+data:
+  events_file: "D:/ChenMeng/Graduate_Student/Experiment_and_Data/Flare_with_without_CME_forecast/data/raw/events_training.xlsx"
+  hdf5_path: "data/Solar_Flares_CME_dataset.h5"
+  raw_data_dir: "data/raw"
+  processed_data_dir: "data/processed"
+  numeric_cache_dir: "data/processed_arrays"
+  hdf5_image_source: "fits_cache"
+  proposal_cache_path: "outputs/proposals/stage2_yolo11_mag_euv171_euv94_512_event_start_conf005.json"
+
+  modalities:
+    magnetogram:
+      enabled: true
+      channels: 1
+      resolution: [256, 256]
+      wavelength: 6173.0
+      unit: "Gauss"
+      instrument: "SDO/HMI"
+      normalization: [-2000, 2000]
+      required: true
+      cadence: "720s"
+      series: "hmi.M_720s"
+
+    euv_94:
+      enabled: true
+      channels: 1
+      resolution: [256, 256]
+      wavelength: 94.0
+      unit: "DN/s"
+      instrument: "SDO/AIA"
+      normalization: [0, 50000]
+      required: true
+      cadence: "12s"
+
+    euv_171:
+      enabled: true
+      channels: 1
+      resolution: [256, 256]
+      wavelength: 171.0
+      unit: "DN/s"
+      instrument: "SDO/AIA"
+      normalization: [0, 30000]
+      required: true
+      cadence: "12s"
+
+    euv_193:
+      enabled: false
+      channels: 1
+      resolution: [256, 256]
+      wavelength: 193.0
+      unit: "DN/s"
+      instrument: "SDO/AIA"
+      normalization: [0, 40000]
+      required: false
+      cadence: "12s"
+
+    euv_304:
+      enabled: false
+      channels: 1
+      resolution: [256, 256]
+      wavelength: 304.0
+      unit: "DN/s"
+      instrument: "SDO/AIA"
+      normalization: [0, 30000]
+      required: false
+      cadence: "12s"
+
+    halpha:
+      enabled: false
+      channels: 1
+      resolution: [256, 256]
+      wavelength: 6562.8
+      unit: "counts"
+      instrument: "CHASE/Halpha"
+      normalization: [0, 255]
+      required: false
+      cadence: "1200s"
+      url_file: "D:/ChenMeng/Graduate_Student/Experiment_and_Data/Flare_with_without_CME_forecast/data/raw/Halpha_download.txt"
+
+  time:
+    pre_event_hours: 6
+    post_event_hours: 3
+    cadence_minutes: 60
+
+  max_activities: 5
+  sequence_length: 10
+  stride: 10
+  forecast_horizon: 3
+
+  runtime:
+    hdf5_locking: false
+
+  split_data_dir: "data/split_data"
+
+  splits:
+    split_method: "temporal"
+    train_ratio: 0.7
+    val_ratio: 0.2
+    test_ratio: 0.1
+    random_seed: 42
+
+  preprocessing:
+    handle_missing: "nearest"
+    interpolation_order: 1
+    cache_processed: true
+    num_workers: 4

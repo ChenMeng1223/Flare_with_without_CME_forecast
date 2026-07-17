@@ -1,0 +1,66 @@
+# 模型配置
+model:
+  type: "multimodal_transformer"  # multimodal_transformer, spatial_temporal_cnn
+
+  # 通用参数（分辨率、序列长度建议以 data_config 为单一配置源）
+  input_size: [256, 256]
+  sequence_length: 9
+  num_classes: 3  # 0=无事件, 1=爆发(eruptive/CME), 2=束缚(confined)
+  max_activities: 15  # 每个事件的最大活动数
+  use_physical_constraints: true
+
+  # 分辨率与 token 预算配置
+  spatial:
+    encoder_downsample_factor: 4  # 当前 SpatialModalityEncoder 两次 MaxPool2d(2)，总下采样 4 倍
+
+  # Transformer配置
+  transformer:
+    hidden_dim: 256          # 隐藏层维度从512减少到256
+    # →减少显存占用，数据进入 Transformer 后，会被转换成固定长度的特征向量。模型里所有层（注意力、前馈）的特征维度，全部统一用256维。
+    num_heads: 4             # 多头注意力头数，从8减少到4。 hidden_dim 必须能被 num_heads 整除！
+    # →把256维的特征，平均分成4个小组，每个小组独立计算「注意力权重」（捕捉太阳数据中不同区域的关联），最后再合并结果。4个头=4个视角同时捕捉耀斑特征
+    num_layers: 3            # Transformer 堆叠层数，从6减少到3
+    # Transformer 的核心模块（注意力 + 前馈网络），重复堆叠 3 次，让模型能够学习到更复杂的特征交互。
+    dropout: 0.1
+    feedforward_dim: 1024    # 前馈神经网络维度，从2048减少到1024，减少计算量
+    # →前馈网络是注意力模块的「后处理」，负责将注意力结果映射回原始特征空间。
+    # 注意力层之后，会接一个两层全连接网络：256维→1024维（扩维）→256维，先扩维提升特征表达能力，再降维回来。
+    # 行业标准规则：feedforward_dim = 4 × hidden_dim
+
+  # CNN配置
+  cnn:
+    backbone: "resnet50"
+    pretrained: true
+    freeze_backbone: false
+
+  # 多模态融合
+  fusion:
+    method: "attention"  # attention, concatenation, weighted_sum
+    attention_dim: 256
+    num_fusion_layers: 2
+
+  # 两阶段最小实现配置
+  stage2:
+    enabled: true
+    context_scale: 2.0  #获取proposal box周围的信息时bbox扩大的倍数
+    use_global_feature: true
+    use_proposal_feature: true
+
+  # 时间头与 bbox refine 约束
+  prediction_heads:
+    time:
+      enabled: false
+      offset_range_days: 2.0  # 时间偏移范围（天）
+      max_duration_hours: 1.0 # 最大持续时长（小时）
+    bbox:
+      refine_center_scale: 0.15 # 中心精修缩放系数  模型预测的「中心偏移量」会 × 0.15，限制中心微调幅度为 15%。只允许框的中心做小幅度精细调整，不会让框乱跑，保证位置精准。
+      refine_size_log_scale: 0.35 # 尺寸精修缩放系数  模型在对数空间预测宽高缩放值，最终 × 0.35，限制宽高调整幅度为 35%
+      gate_bbox_size: false
+      proposal_init_size_bias: -2.2 # 初始候选框尺寸偏置（对数空间）  负数 = 初始框默认偏小 正数 = 初始框默认偏大
+
+  # 物理约束
+  physics:
+    magnetic_energy_weight: 0.1
+    helicity_weight: 0.05
+    energy_balance_weight: 0.1
+    enabled_constraints: ["magnetic_energy", "helicity"]
