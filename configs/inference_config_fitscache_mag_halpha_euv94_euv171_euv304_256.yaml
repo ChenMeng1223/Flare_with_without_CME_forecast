@@ -13,14 +13,14 @@ inference:
   bbox_processing:
     min_area: 1
     max_area_ratio: 0.35
-    min_confidence: 0.05
-    min_positive_confidence: 0.05
-    min_event_probability: 0.00
-    min_proposal_score: 0.005
+    min_confidence: 0.15
+    min_positive_confidence: 0.15
+    min_event_probability: 0.05
+    min_proposal_score: 0.03
     min_effective_size: 0.0
-    nms_threshold: 0.70
-    merge_iou_threshold: 0.85
-    max_detections: 15
+    nms_threshold: 0.65
+    merge_iou_threshold: 0.80
+    max_detections: 12
     detection_box_source: "proposal"
     allow_background_fallback: true
 

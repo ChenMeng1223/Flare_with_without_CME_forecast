@@ -45,8 +45,8 @@ logger = logging.getLogger(__name__)
 # =========================
 USE_DIRECT_RUN_CONFIG = True
 DIRECT_RUN_CONFIG = {
-    'run_mode': 'test_set',  # 可选: 'single_event' | 'test_set' | 'batch_dir'
-    'model_path': 'outputs/checkpoints_fitscache_mag_halpha_euv94_euv171_euv304_256/solar_flare_cme_model_epoch_0088.pth',
+    'run_mode': 'all_set',  # options: 'single_event' | 'test_set' | 'all_set' | 'batch_dir'
+    'model_path': 'outputs/checkpoints_fitscache_mag_halpha_euv94_euv171_euv304_256_hardneg/solar_flare_cme_model_epoch_0106.pth',
     'data_path': 'data/Solar_Flares_CME_dataset_fitscache.h5',
     'event_id': '',    # single_event 模式留空则自动选择第一个可用事件
     'output_dir': 'outputs/predictions/fitscache_mag_halpha_euv94_euv171_euv304_256_direct_run',
@@ -102,6 +102,13 @@ def _build_direct_run_args() -> List[str]:
         args.append('--disable_visualization')
 
     return args
+
+
+def _selected_splits(run_mode: str, split_name: str) -> List[str]:
+    """Return dataset splits to run for split-level inference."""
+    if run_mode == 'all_set' or split_name == 'all':
+        return ['train', 'val', 'test']
+    return [split_name]
 
 
 def _to_serializable(value: Any) -> Any:
@@ -915,9 +922,6 @@ def _run_test_set_inference(
                             show_gt_proposal_prediction_overlay=True,
                         )
                         plt.close('all')
-                    visualizer.create_summary_report(predictions, vis_dir, event_id)
-                    plt.close('all')
-                    
                 except Exception as e:
                     logger.warning(f"事件 {event_id} 可视化生成失败: {e}")
 
@@ -948,6 +952,20 @@ def _run_test_set_inference(
 
     if save_visualizations:
         _save_batch_visualizations(slot_detailed_df, output_dir)
+        if MATPLOTLIB_AVAILABLE:
+            try:
+                split_visualizer = PredictionVisualizer(
+                    image_size=target_size,
+                    time_head_enabled=bool(getattr(predictor, 'time_head_enabled', True)),
+                )
+                split_visualizer.create_summary_report(
+                    all_predictions,
+                    output_dir / 'visualizations',
+                    split_name,
+                )
+                plt.close('all')
+            except Exception as e:
+                logger.warning(f"{split_name} 集汇总 summary_report 生成失败: {e}")
 
     # 与训练/验证一致的分类指标（仅 test_set 批量模式）
     try:
@@ -1015,7 +1033,7 @@ def main(args=None):
     """主函数"""
     parser = argparse.ArgumentParser(description='运行太阳耀斑预测')
     parser.add_argument('--run_mode', type=str, default='single_event',
-                        choices=['single_event', 'test_set', 'batch_dir'],
+                        choices=['single_event', 'test_set', 'all_set', 'batch_dir'],
                         help='运行模式：单事件 / 整个划分测试集 / 目录批处理')
     parser.add_argument('--model_path', type=str, required=True,
                         help='模型文件路径')
@@ -1144,32 +1162,37 @@ def main(args=None):
         # 检查数据路径
         data_path = Path(args.data_path)
 
-        if args.run_mode == 'test_set':
+        if args.run_mode in ('test_set', 'all_set'):
             if not (data_path.is_file() and data_path.suffix == '.h5'):
                 logger.error("run_mode=test_set 时，data_path 必须是单个 HDF5 文件")
                 return 1
 
-            result = _run_test_set_inference(
-                predictor=predictor,
-                hdf5_path=str(data_path),
-                output_dir=Path(args.output_dir) / args.split_name,
-                split_name=args.split_name,
-                split_file=args.split_file,
-                window_size=window_size,
-                stride=stride,
-                modalities=modalities,
-                use_uncertainty=use_uncertainty,
-                save_visualizations=not args.disable_visualization and MATPLOTLIB_AVAILABLE,
-                max_events=args.max_events,
-                visualize_predictions=not args.disable_visualization,
-                viz_frame=args.viz_frame,
-                model_cfg=model_cfg,
-                proposal_cache_path=data_config.get('proposal_cache_path'),
-                save_window_visualizations=False,
-                save_event_overlay_visualization=True,
-            )
-            if result != 0:
-                return result
+            splits_to_run = _selected_splits(args.run_mode, args.split_name)
+            if args.split_file and len(splits_to_run) > 1:
+                logger.warning("Ignoring split_file in all_set mode; using data/split_data/<split>_events.txt")
+
+            for split in splits_to_run:
+                result = _run_test_set_inference(
+                    predictor=predictor,
+                    hdf5_path=str(data_path),
+                    output_dir=Path(args.output_dir) / split,
+                    split_name=split,
+                    split_file=args.split_file if len(splits_to_run) == 1 else '',
+                    window_size=window_size,
+                    stride=stride,
+                    modalities=modalities,
+                    use_uncertainty=use_uncertainty,
+                    save_visualizations=not args.disable_visualization and MATPLOTLIB_AVAILABLE,
+                    max_events=args.max_events,
+                    visualize_predictions=not args.disable_visualization,
+                    viz_frame=args.viz_frame,
+                    model_cfg=model_cfg,
+                    proposal_cache_path=data_config.get('proposal_cache_path'),
+                    save_window_visualizations=False,
+                    save_event_overlay_visualization=True,
+                )
+                if result != 0:
+                    return result
 
         elif data_path.is_file() and data_path.suffix == '.h5':
             # HDF5 单事件模式（保留原来的 event_id 方式）

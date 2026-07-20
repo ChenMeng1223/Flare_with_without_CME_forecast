@@ -3,6 +3,7 @@
 """
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import torch.optim as optim
 from torch.utils.data import DataLoader
 from typing import Dict, Optional, Tuple, Any, List
@@ -194,10 +195,11 @@ class SolarFlareTrainer:
                 class_weight_tensor = None
 
         criterion = {
-            # 仅对类别 1/2 做二分类；类别 0 留给空槽位，不参与分类损失
+            # 槽位级 0/1/2 三分类；0 表示背景/未匹配 proposal。
             'classification': nn.CrossEntropyLoss(weight=class_weight_tensor),
             'time': nn.SmoothL1Loss(beta=0.05),
             'time_duration': nn.SmoothL1Loss(beta=0.05),
+            'activity_objectness': nn.BCEWithLogitsLoss(),
             'event_prob': nn.BCEWithLogitsLoss(),  # 改为BCEWithLogitsLoss，兼容混合精度训练
             'proposal_score': nn.BCEWithLogitsLoss(),
             'bbox_l1': nn.L1Loss(),
@@ -405,10 +407,13 @@ class SolarFlareTrainer:
         return widths * heights
 
     def _compute_composite_validation_score(self, val_metrics: Dict[str, float]) -> float:
-        """综合验证指标：兼顾分类、定位与损失稳定性，越大越好。"""
-        val_f1 = float(val_metrics.get('f1', 0.0))
+        """综合验证指标：优先兼顾活动检出、误报抑制、分类和定位，越大越好。"""
+        activity_binary = val_metrics.get('activity_binary_all_slots', {}) or {}
+        val_activity_f1 = float(activity_binary.get('f1', val_metrics.get('f1', 0.0)))
+        val_activity_precision = float(activity_binary.get('precision', 0.0))
+        val_activity_recall = float(activity_binary.get('recall', 0.0))
+        val_cls_f1 = float(val_metrics.get('f1', 0.0))
         val_iou = float(val_metrics.get('iou', 0.0))
-        val_tss = float(val_metrics.get('tss', 0.0))
         val_loss = float(val_metrics.get('loss', 0.0))
         classification_loss = float(val_metrics.get('classification_loss', 0.0))
         time_rmse = float(val_metrics.get('rmse', 0.0)) if self.enable_time_prediction else 0.0
@@ -418,12 +423,14 @@ class SolarFlareTrainer:
         rmse_term = 1.0 / (1.0 + max(time_rmse, 0.0))
 
         composite = (
-            0.35 * val_f1 +
-            0.25 * val_iou +
-            0.20 * max(val_tss, 0.0) +
-            0.10 * loss_term +
-            0.05 * cls_loss_term +
-            0.05 * rmse_term
+            0.35 * val_activity_f1 +
+            0.20 * val_iou +
+            0.15 * val_cls_f1 +
+            0.15 * val_activity_recall +
+            0.10 * val_activity_precision +
+            0.03 * loss_term +
+            0.01 * cls_loss_term +
+            0.01 * rmse_term
         )
         return float(composite)
 
@@ -650,6 +657,57 @@ class SolarFlareTrainer:
         _assert_finite('分类损失', class_loss)
         loss_components['classification'] = class_loss
 
+        class_logits_all = outputs['class_logits']
+        class_targets_all = slot_labels
+
+        # 2b. Hard negative mining：重点惩罚高置信预测成 1/2 的背景槽位。
+        hard_negative_cfg = self.config.get('hard_negative_mining', {}) or {}
+        hard_negative_loss = torch.tensor(0.0, device=self.device)
+        if bool(hard_negative_cfg.get('enabled', False)):
+            flat_logits = class_logits_all.reshape(-1, class_logits_all.size(-1))
+            flat_targets = class_targets_all.reshape(-1)
+            negative_mask = flat_targets == 0
+            if negative_mask.any():
+                with torch.no_grad():
+                    probs = torch.softmax(flat_logits, dim=-1)
+                    positive_conf = probs[:, 1:3].max(dim=-1).values if probs.size(-1) >= 3 else probs.max(dim=-1).values
+                    negative_scores = positive_conf[negative_mask]
+                    num_neg = int(negative_scores.numel())
+                    num_pos = int((flat_targets > 0).sum().item())
+                    max_neg_per_pos = float(hard_negative_cfg.get('max_neg_per_pos', 3.0))
+                    min_negatives = int(hard_negative_cfg.get('min_negatives', 4))
+                    topk_ratio = float(hard_negative_cfg.get('topk_ratio', 0.35))
+                    topk = max(min_negatives, int(round(num_neg * topk_ratio)))
+                    if num_pos > 0:
+                        topk = min(topk, int(max_neg_per_pos * num_pos))
+                    topk = max(1, min(topk, num_neg))
+                    selected_neg_positions = torch.nonzero(negative_mask, as_tuple=False).flatten()[
+                        torch.topk(negative_scores, k=topk, largest=True).indices
+                    ]
+                class_weight = getattr(self.criterion['classification'], 'weight', None)
+                hard_negative_loss = F.cross_entropy(
+                    flat_logits[selected_neg_positions],
+                    torch.zeros_like(selected_neg_positions, dtype=torch.long),
+                    weight=class_weight,
+                    reduction='mean',
+                )
+        _assert_finite('hard negative 分类损失', hard_negative_loss)
+        loss_components['hard_negative_classification'] = hard_negative_loss
+
+        # 2c. Activity/objectness 辅助损失：直接监督“该 slot 有没有活动”，抑制背景误报。
+        activity_loss = torch.tensor(0.0, device=self.device)
+        if bool(self.config.get('activity_objectness_loss', {}).get('enabled', False)):
+            if class_logits_all.size(-1) >= 3:
+                positive_logit = torch.logsumexp(class_logits_all[..., 1:3], dim=-1)
+                background_logit = class_logits_all[..., 0]
+                activity_logit = positive_logit - background_logit
+            else:
+                activity_logit = class_logits_all[..., -1]
+            activity_targets = positive_event_slot_mask.float()
+            activity_loss = self.criterion['activity_objectness'](activity_logit, activity_targets)
+        _assert_finite('activity/objectness 辅助损失', activity_loss)
+        loss_components['activity_objectness'] = activity_loss
+
         # 3. 第一阶段 proposal/objectness 损失
         if external_proposals:
             proposal_score_logits = None
@@ -826,8 +884,12 @@ class SolarFlareTrainer:
 
         # 10. 计算总损失
         suppression_weight = float(self.config['loss_weights'].get('negative_suppression', 0.2))
+        hard_negative_weight = float(self.config['loss_weights'].get('hard_negative_classification', 0.0))
+        activity_objectness_weight = float(self.config['loss_weights'].get('activity_objectness', 0.0))
         total_loss = (
                 self.config['loss_weights']['classification'] * class_loss +
+                hard_negative_weight * hard_negative_loss +
+                activity_objectness_weight * activity_loss +
                 self.config['loss_weights']['bbox_regression'] * proposal_bbox_loss +
                 self.config['loss_weights'].get('bbox_refine', self.config['loss_weights']['bbox_regression']) * bbox_loss +
                 self.config['loss_weights']['time_prediction'] * time_loss +
@@ -855,6 +917,8 @@ class SolarFlareTrainer:
         epoch_metrics = {
             'loss': 0.0,
             'classification_loss': 0.0,
+            'hard_negative_classification_loss': 0.0,
+            'activity_objectness_loss': 0.0,
             'proposal_score_loss': 0.0,
             'proposal_bbox_loss': 0.0,
             'bbox_loss': 0.0,
@@ -966,6 +1030,8 @@ class SolarFlareTrainer:
                 batch_size = targets['label'].size(0)
                 epoch_metrics['loss'] += total_loss.item() * batch_size
                 epoch_metrics['classification_loss'] += loss_components['classification'].item() * batch_size
+                epoch_metrics['hard_negative_classification_loss'] += loss_components.get('hard_negative_classification', torch.tensor(0.0, device=self.device)).item() * batch_size
+                epoch_metrics['activity_objectness_loss'] += loss_components.get('activity_objectness', torch.tensor(0.0, device=self.device)).item() * batch_size
                 epoch_metrics['proposal_score_loss'] += loss_components['proposal_score'].item() * batch_size
                 epoch_metrics['proposal_bbox_loss'] += loss_components['proposal_bbox'].item() * batch_size
                 epoch_metrics['bbox_loss'] += loss_components['bbox'].item() * batch_size
@@ -1052,7 +1118,7 @@ class SolarFlareTrainer:
 
         # 计算平均指标
         total_samples = len(train_loader.dataset)
-        for key in ['loss', 'classification_loss', 'proposal_score_loss', 'proposal_bbox_loss', 'bbox_loss', 'time_loss', 'event_prob_loss', 'physics_loss', 'accuracy', 'precision', 'recall', 'f1', 'proposal_score_mean']:
+        for key in ['loss', 'classification_loss', 'hard_negative_classification_loss', 'activity_objectness_loss', 'proposal_score_loss', 'proposal_bbox_loss', 'bbox_loss', 'time_loss', 'event_prob_loss', 'physics_loss', 'accuracy', 'precision', 'recall', 'f1', 'proposal_score_mean']:
             epoch_metrics[key] /= total_samples
 
         if len(all_predictions) > 0:
@@ -1178,6 +1244,8 @@ class SolarFlareTrainer:
         epoch_metrics = {
             'loss': 0.0,
             'classification_loss': 0.0,
+            'hard_negative_classification_loss': 0.0,
+            'activity_objectness_loss': 0.0,
             'proposal_score_loss': 0.0,
             'proposal_bbox_loss': 0.0,
             'bbox_loss': 0.0,
@@ -1257,6 +1325,8 @@ class SolarFlareTrainer:
                 batch_size = targets['label'].size(0)
                 epoch_metrics['loss'] += total_loss.item() * batch_size
                 epoch_metrics['classification_loss'] += loss_components['classification'].item() * batch_size
+                epoch_metrics['hard_negative_classification_loss'] += loss_components.get('hard_negative_classification', torch.tensor(0.0, device=self.device)).item() * batch_size
+                epoch_metrics['activity_objectness_loss'] += loss_components.get('activity_objectness', torch.tensor(0.0, device=self.device)).item() * batch_size
                 epoch_metrics['proposal_score_loss'] += loss_components['proposal_score'].item() * batch_size
                 epoch_metrics['proposal_bbox_loss'] += loss_components['proposal_bbox'].item() * batch_size
                 epoch_metrics['bbox_loss'] += loss_components['bbox'].item() * batch_size
@@ -1329,7 +1399,7 @@ class SolarFlareTrainer:
 
         # 计算平均指标
         total_samples = len(val_loader.dataset)
-        for key in ['loss', 'classification_loss', 'proposal_score_loss', 'proposal_bbox_loss', 'bbox_loss', 'time_loss',
+        for key in ['loss', 'classification_loss', 'hard_negative_classification_loss', 'activity_objectness_loss', 'proposal_score_loss', 'proposal_bbox_loss', 'bbox_loss', 'time_loss',
                     'event_prob_loss', 'physics_loss']:
             if key in epoch_metrics:
                 epoch_metrics[key] /= total_samples

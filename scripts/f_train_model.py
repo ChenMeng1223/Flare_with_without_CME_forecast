@@ -25,11 +25,11 @@ from utils.config_utils import load_config
 
 USE_DIRECT_RUN_CONFIG = True
 DIRECT_RUN_CONFIG = {
-    'data_config': 'configs/data_config_stage2_yolo11_5modal_256.yaml',
+    'data_config': 'configs/data_config_fitscache_mag_halpha_euv94_euv171_euv304_256.yaml',
     'model_config': 'configs/model_config.yaml',
-    'train_config': 'configs/training_config_stage2_yolo11_5modal.yaml',
-    'hdf5_path': 'data/Solar_Flares_CME_dataset.h5',
-    'output_dir': 'outputs/stage2_yolo11_5modal_256',
+    'train_config': 'configs/training_config_fitscache_mag_halpha_euv94_euv171_euv304.yaml',
+    'hdf5_path': 'data/Solar_Flares_CME_dataset_fitscache.h5',
+    'output_dir': 'outputs/fitscache_mag_halpha_euv94_euv171_euv304_256_hardneg',
     'log_dir': 'logs',
     'debug': False,
 }

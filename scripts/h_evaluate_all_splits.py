@@ -49,7 +49,7 @@ logger = logging.getLogger("train_model")
 # =========================
 USE_DIRECT_RUN_CONFIG = True
 DIRECT_RUN_CONFIG = {
-    'model_path': 'outputs/checkpoints_fitscache_mag_halpha_euv94_euv171_euv304_256/solar_flare_cme_model_epoch_0088.pth',
+    'model_path': 'outputs\checkpoints_fitscache_mag_halpha_euv94_euv171_euv304_256_hardneg\solar_flare_cme_model_epoch_0106.pth',
     'data_config': 'configs/data_config_fitscache_mag_halpha_euv94_euv171_euv304_256.yaml',
     'model_config': 'configs/model_config.yaml',
     'train_config': 'configs/training_config_fitscache_mag_halpha_euv94_euv171_euv304.yaml',
