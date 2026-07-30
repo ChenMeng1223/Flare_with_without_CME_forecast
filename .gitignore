@@ -20,7 +20,8 @@ env/
 *.code-workspace
 
 # Large datasets and generated research artifacts
-data/
+data/*
+!data/*.py
 outputs/
 runs/
 logs/
