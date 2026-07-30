@@ -8,7 +8,7 @@ import argparse
 import sys
 import json
 from pathlib import Path
-from typing import List, Dict, Any, Tuple, Optional, Union
+from typing import List, Dict, Any, Tuple, Optional, Union, Iterable
 import logging
 
 # 添加项目路径
@@ -423,7 +423,13 @@ def _build_gt_sample_lookup(dataset: SolarFlareDataset) -> Dict[str, Dict[str, A
     return lookup
 
 
-def _load_split_event_ids(hdf5_path: str, split_name: str = 'test', split_file: str = '', max_events: int = 0) -> List[str]:
+def _load_split_event_ids(
+    hdf5_path: str,
+    split_name: str = 'test',
+    split_file: str = '',
+    max_events: int = 0,
+    exclude_event_ids: Optional[Iterable[str]] = None,
+) -> List[str]:
     """读取指定划分中的 event_id 列表；若不存在则退回到 HDF5 中所有可用事件。"""
     event_ids: List[str] = []
 
@@ -436,6 +442,20 @@ def _load_split_event_ids(hdf5_path: str, split_name: str = 'test', split_file: 
         logger.warning(f"未找到划分文件 {split_path}，将退回到 HDF5 中所有可用事件")
         reader = HDF5DatasetReader(hdf5_path)
         event_ids = reader.get_event_ids(available_only=True)
+
+    excluded = {str(event_id).strip() for event_id in (exclude_event_ids or []) if str(event_id).strip()}
+    if excluded:
+        original_count = len(event_ids)
+        removed_event_ids = [event_id for event_id in event_ids if event_id in excluded]
+        event_ids = [event_id for event_id in event_ids if event_id not in excluded]
+        removed_count = original_count - len(event_ids)
+        if removed_count:
+            logger.warning(
+                "根据 data_config.exclude_event_ids 从 %s split 推理列表排除 %d 个事件: %s",
+                split_name,
+                removed_count,
+                sorted(removed_event_ids),
+            )
 
     if max_events and max_events > 0:
         event_ids = event_ids[:max_events]
@@ -786,9 +806,16 @@ def _run_test_set_inference(
     proposal_cache_path: Optional[str] = None,
     save_window_visualizations: bool = False,
     save_event_overlay_visualization: bool = True,
+    exclude_event_ids: Optional[Iterable[str]] = None,
 ) -> int:
     """批量测试整个 train/val/test 划分。"""
-    event_ids = _load_split_event_ids(hdf5_path, split_name, split_file, max_events)
+    event_ids = _load_split_event_ids(
+        hdf5_path,
+        split_name,
+        split_file,
+        max_events,
+        exclude_event_ids=exclude_event_ids,
+    )
     if not event_ids:
         logger.error("未找到可用于批量测试的 event_id")
         return 1
@@ -1190,6 +1217,7 @@ def main(args=None):
                     proposal_cache_path=data_config.get('proposal_cache_path'),
                     save_window_visualizations=False,
                     save_event_overlay_visualization=True,
+                    exclude_event_ids=data_config.get('exclude_event_ids', []),
                 )
                 if result != 0:
                     return result

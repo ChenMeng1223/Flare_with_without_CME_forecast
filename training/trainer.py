@@ -274,13 +274,18 @@ class SolarFlareTrainer:
             self,
             predictions: torch.Tensor,
             targets: torch.Tensor,
-            num_classes: int
+            num_classes: int,
+            include_three_class_metrics: bool = True,
     ) -> Dict[str, Any]:
         """计算槽位级分类指标与每类统计。"""
         pred_np = predictions.detach().cpu().numpy()
         target_np = targets.detach().cpu().numpy()
 
-        metrics = calculate_metrics(pred_np, target_np, num_classes=num_classes)
+        metrics = (
+            calculate_metrics(pred_np, target_np, num_classes=num_classes)
+            if include_three_class_metrics
+            else {}
+        )
         metrics['activity_binary'] = self._compute_activity_binary_metrics(target_np, pred_np)
         metrics['positive_class_ovr'] = self._compute_positive_class_ovr_metrics(target_np, pred_np)
 
@@ -1072,7 +1077,8 @@ class SolarFlareTrainer:
                     metrics = self._compute_slot_classification_metrics(
                         pred_slots_flat,
                         target_slots_flat,
-                        num_classes=self.config.get('num_classes', 3)
+                        num_classes=self.config.get('num_classes', 3),
+                        include_three_class_metrics=False,
                     )
                 else:
                     metrics = {
@@ -1113,7 +1119,7 @@ class SolarFlareTrainer:
                 # 更新进度条
                 pbar.set_postfix({
                     'loss': total_loss.item(),
-                    'acc': metrics.get('accuracy_12', metrics['accuracy'])
+                    'acc': metrics.get('accuracy_12', metrics.get('accuracy', 0.0))
                 })
 
         # 计算平均指标
@@ -1125,7 +1131,8 @@ class SolarFlareTrainer:
             epoch_cls_metrics = self._compute_slot_classification_metrics(
                 torch.as_tensor(np.asarray(all_predictions, dtype=np.int64)),
                 torch.as_tensor(np.asarray(all_targets, dtype=np.int64)),
-                num_classes=self.config.get('num_classes', 3)
+                num_classes=self.config.get('num_classes', 3),
+                include_three_class_metrics=False,
             )
             epoch_metrics['train_pred_class_counts'] = epoch_cls_metrics.get('pred_class_counts', {})
             epoch_metrics['train_target_class_counts'] = epoch_cls_metrics.get('target_class_counts', {})
@@ -1140,12 +1147,6 @@ class SolarFlareTrainer:
             epoch_metrics['train_class_tss_12'] = epoch_cls_metrics.get('class_tss_12', {})
             epoch_metrics['train_confusion_matrix_12'] = epoch_cls_metrics.get('confusion_matrix_12', [[0, 0], [0, 0]])
             epoch_metrics['train_confusion_matrix_12_with_background'] = epoch_cls_metrics.get('confusion_matrix_12_with_background', [[0, 0, 0], [0, 0, 0]])
-
-            epoch_metrics['accuracy_all'] = float(epoch_cls_metrics.get('accuracy', 0.0))
-            epoch_metrics['precision_all'] = float(epoch_cls_metrics.get('macro_precision', 0.0))
-            epoch_metrics['recall_all'] = float(epoch_cls_metrics.get('macro_recall', 0.0))
-            epoch_metrics['f1_all'] = float(epoch_cls_metrics.get('macro_f1', 0.0))
-            epoch_metrics['tss_all'] = float(epoch_cls_metrics.get('macro_tss', 0.0))
 
             epoch_metrics['accuracy'] = float(epoch_cls_metrics.get('accuracy_12', 0.0))
             epoch_metrics['precision'] = float(epoch_cls_metrics.get('macro_precision_12', 0.0))
@@ -1170,11 +1171,6 @@ class SolarFlareTrainer:
             epoch_metrics['train_class_tss_12'] = {}
             epoch_metrics['train_confusion_matrix_12'] = [[0, 0], [0, 0]]
             epoch_metrics['train_confusion_matrix_12_with_background'] = [[0, 0, 0], [0, 0, 0]]
-            epoch_metrics['accuracy_all'] = 0.0
-            epoch_metrics['precision_all'] = 0.0
-            epoch_metrics['recall_all'] = 0.0
-            epoch_metrics['f1_all'] = 0.0
-            epoch_metrics['tss_all'] = 0.0
             epoch_metrics['accuracy'] = 0.0
             epoch_metrics['precision'] = 0.0
             epoch_metrics['recall'] = 0.0
@@ -1222,9 +1218,17 @@ class SolarFlareTrainer:
         else:
             epoch_metrics['iou'] = 0.0
 
-        # 记录到wandb
+        # 记录到wandb；*_all 是在 activity-only 样本上额外纳入空背景类的宏平均，
+        # 不再上报，避免与真正的 all-slots 指标混淆。
         if self.use_wandb:
-            wandb.log({f'train/{k}': v for k, v in epoch_metrics.items() if np.isscalar(v)}, step=self.current_epoch)
+            wandb.log(
+                {
+                    f'train/{k}': v
+                    for k, v in epoch_metrics.items()
+                    if np.isscalar(v) and not k.endswith('_all')
+                },
+                step=self.current_epoch,
+            )
 
         return epoch_metrics
 
@@ -1369,7 +1373,8 @@ class SolarFlareTrainer:
                     batch_metrics = self._compute_slot_classification_metrics(
                         pred_slots_flat,
                         target_slots_flat,
-                        num_classes=self.config.get('num_classes', 3)
+                        num_classes=self.config.get('num_classes', 3),
+                        include_three_class_metrics=False,
                     )
                 else:
                     batch_metrics = {
@@ -1395,7 +1400,10 @@ class SolarFlareTrainer:
                         'class_f1_12': {},
                         'class_tss_12': {},
                     }
-                pbar.set_postfix({'loss': total_loss.item(), 'acc': batch_metrics.get('accuracy_12', batch_metrics['accuracy'])})
+                pbar.set_postfix({
+                    'loss': total_loss.item(),
+                    'acc': batch_metrics.get('accuracy_12', batch_metrics.get('accuracy', 0.0)),
+                })
 
         # 计算平均指标
         total_samples = len(val_loader.dataset)
@@ -1409,7 +1417,8 @@ class SolarFlareTrainer:
             metrics = self._compute_slot_classification_metrics(
                 torch.as_tensor(np.array(all_predictions)),
                 torch.as_tensor(np.array(all_targets)),
-                num_classes=self.config.get('num_classes', 3)
+                num_classes=self.config.get('num_classes', 3),
+                include_three_class_metrics=False,
             )
         else:
             metrics = {
@@ -1457,12 +1466,6 @@ class SolarFlareTrainer:
         epoch_metrics['positive_class_ovr_all_slots'] = all_slot_metrics.get('positive_class_ovr', {}) if all_slot_metrics else {}
         epoch_metrics['num_eval_activity_slots'] = int(len(all_predictions))
         epoch_metrics['num_eval_all_slots'] = int(len(all_slot_predictions))
-        # 同步写入训练器期望字段名
-        epoch_metrics['accuracy_all'] = float(metrics.get('accuracy', 0.0))
-        epoch_metrics['precision_all'] = float(metrics.get('macro_precision', 0.0))
-        epoch_metrics['recall_all'] = float(metrics.get('macro_recall', 0.0))
-        epoch_metrics['f1_all'] = float(metrics.get('macro_f1', 0.0))
-        epoch_metrics['tss_all'] = float(metrics.get('macro_tss', 0.0))
         epoch_metrics['accuracy'] = float(metrics.get('accuracy_12', 0.0))
         epoch_metrics['precision'] = float(metrics.get('macro_precision_12', 0.0))
         epoch_metrics['recall'] = float(metrics.get('macro_recall_12', 0.0))
@@ -1514,9 +1517,16 @@ class SolarFlareTrainer:
             epoch_metrics['val_pred_class_counts'] = epoch_metrics.get('val_pred_class_counts', {})
             epoch_metrics['val_target_class_counts'] = epoch_metrics.get('val_target_class_counts', {})
 
-        # 记录到wandb
+        # 记录到wandb；过滤与 train 侧相同的 *_all 宏平均指标。
         if self.use_wandb:
-            wandb.log({f'val/{k}': v for k, v in epoch_metrics.items() if np.isscalar(v)}, step=self.current_epoch)
+            wandb.log(
+                {
+                    f'val/{k}': v
+                    for k, v in epoch_metrics.items()
+                    if np.isscalar(v) and not k.endswith('_all')
+                },
+                step=self.current_epoch,
+            )
 
         return epoch_metrics
 
@@ -1542,9 +1552,7 @@ class SolarFlareTrainer:
             'train_loss': [], 'val_loss': [],
             'train_accuracy': [], 'val_accuracy': [],
             'train_f1': [], 'val_f1': [],
-            'train_f1_all': [], 'val_f1_all': [],
             'train_tss': [], 'val_tss': [],
-            'train_tss_all': [], 'val_tss_all': [],
             'train_rss': [], 'val_rss': [],
             'train_rmse': [], 'val_rmse': [],
             'train_iou': [], 'val_iou': [],
@@ -1579,12 +1587,8 @@ class SolarFlareTrainer:
             history['val_accuracy'].append(val_metrics['accuracy'])
             history['train_f1'].append(train_metrics['f1'])
             history['val_f1'].append(val_metrics['f1'])
-            history['train_f1_all'].append(train_metrics.get('f1_all', 0.0))
-            history['val_f1_all'].append(val_metrics.get('f1_all', 0.0))
             history['train_tss'].append(train_metrics.get('tss', 0.0))
             history['val_tss'].append(val_metrics.get('tss', 0.0))
-            history['train_tss_all'].append(train_metrics.get('tss_all', 0.0))
-            history['val_tss_all'].append(val_metrics.get('tss_all', 0.0))
             history['train_rss'].append(train_metrics.get('rss', 0.0))
             history['val_rss'].append(val_metrics.get('rss', 0.0))
             history['train_rmse'].append(train_metrics.get('rmse', 0.0))
@@ -1603,11 +1607,9 @@ class SolarFlareTrainer:
                 f"Epoch {epoch + 1}/{num_epochs} | "
                 f"Train Loss: {train_metrics['loss']:.4f}, Acc12: {train_metrics['accuracy']:.4f}, "
                 f"F1_12: {train_metrics['f1']:.4f}, TSS_12: {train_metrics.get('tss', 0.0):.4f}, "
-                f"F1_all: {train_metrics.get('f1_all', 0.0):.4f}, TSS_all: {train_metrics.get('tss_all', 0.0):.4f}, "
                 f"RSS: {train_metrics.get('rss', 0.0):.4f}, RMSE: {train_metrics.get('rmse', 0.0):.4f}, IoU: {train_metrics.get('iou', 0.0):.4f} | "
                 f"Val Loss: {val_metrics['loss']:.4f}, Acc12: {val_metrics['accuracy']:.4f}, "
                 f"F1_12: {val_metrics['f1']:.4f}, TSS_12: {val_metrics.get('tss', 0.0):.4f}, "
-                f"F1_all: {val_metrics.get('f1_all', 0.0):.4f}, TSS_all: {val_metrics.get('tss_all', 0.0):.4f}, "
                 f"RSS: {val_metrics.get('rss', 0.0):.4f}, RMSE: {val_metrics.get('rmse', 0.0):.4f}, IoU: {val_metrics.get('iou', 0.0):.4f}, Composite: {val_metrics['composite_score']:.4f}"
             )
 
@@ -1622,8 +1624,6 @@ class SolarFlareTrainer:
                     'val_accuracy': val_metrics['accuracy'],
                     'train_f1': train_metrics['f1'],
                     'val_f1': val_metrics['f1'],
-                    'train_f1_all': train_metrics.get('f1_all', 0.0),
-                    'val_f1_all': val_metrics.get('f1_all', 0.0),
                     'val_composite_score': val_metrics['composite_score']
                 }
                 is_best = True
@@ -1688,7 +1688,6 @@ class SolarFlareTrainer:
         logger.info("训练完成！")
         logger.info(f"最佳epoch: {self.best_metrics['epoch'] + 1}")
         logger.info(f"最佳验证F1_12: {self.best_metrics['val_f1']:.4f}")
-        logger.info(f"最佳验证F1_all: {self.best_metrics.get('val_f1_all', 0.0):.4f}")
         logger.info(f"最佳验证综合指标: {self.best_metrics.get('val_composite_score', 0.0):.4f}")
         logger.info(f"最佳验证准确率12: {self.best_metrics['val_accuracy']:.4f}")
 

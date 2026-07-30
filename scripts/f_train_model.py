@@ -149,9 +149,7 @@ def _default_training_history() -> Dict[str, List[float]]:
         'train_loss': [], 'val_loss': [],
         'train_accuracy': [], 'val_accuracy': [],
         'train_f1': [], 'val_f1': [],
-        'train_f1_all': [], 'val_f1_all': [],
         'train_tss': [], 'val_tss': [],
-        'train_tss_all': [], 'val_tss_all': [],
         'train_rss': [], 'val_rss': [],
         'train_rmse': [], 'val_rmse': [],
         'train_iou': [], 'val_iou': [],
@@ -311,6 +309,34 @@ def create_data_loaders(hdf5_path: str, data_config: Dict,
     train_events = load_split_events('train')
     val_events = load_split_events('val')
     test_events = load_split_events('test')
+
+    excluded_event_ids = {
+        str(event_id)
+        for event_id in data_config.get('exclude_event_ids', [])
+        if str(event_id)
+    }
+    if excluded_event_ids:
+        split_events = {
+            'train': train_events,
+            'val': val_events,
+            'test': test_events,
+        }
+        for split_name, event_ids in split_events.items():
+            removed = [event_id for event_id in event_ids if event_id in excluded_event_ids]
+            split_events[split_name] = [
+                event_id for event_id in event_ids
+                if event_id not in excluded_event_ids
+            ]
+            if removed:
+                logger.warning(
+                    "根据 data_config.exclude_event_ids 从 %s split 排除 %d 个事件: %s",
+                    split_name,
+                    len(removed),
+                    removed,
+                )
+        train_events = split_events['train']
+        val_events = split_events['val']
+        test_events = split_events['test']
 
     logger.info(f"数据划分: 训练集 {len(train_events)}, "
                 f"验证集 {len(val_events)}, 测试集 {len(test_events)}")
@@ -492,7 +518,6 @@ def main():
                     'val_loss': float(val_metrics.get('loss', 0.0)),
                     'val_accuracy': float(val_metrics.get('accuracy', 0.0)),
                     'val_f1': float(val_metrics.get('f1', 0.0)),
-                    'val_f1_all': float(val_metrics.get('f1_all', 0.0)),
                     'val_composite_score': float(val_metrics.get('composite_score', checkpoint.get('metric_value', 0.0) or 0.0)),
                 }
         if trainer.best_metrics:

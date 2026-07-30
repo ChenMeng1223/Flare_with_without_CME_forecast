@@ -152,6 +152,23 @@ def _load_split_events(reader: HDF5DatasetReader, data_config: Dict[str, Any], s
 
     available_event_ids = set(reader.get_event_ids(available_only=True))
     filtered = [event_id for event_id in event_ids if event_id in available_event_ids]
+    excluded_event_ids = {
+        str(event_id)
+        for event_id in data_config.get('exclude_event_ids', [])
+        if str(event_id)
+    }
+    removed = [event_id for event_id in filtered if event_id in excluded_event_ids]
+    if removed:
+        logger.warning(
+            "根据 data_config.exclude_event_ids 从 %s split 排除 %d 个事件: %s",
+            split_name,
+            len(removed),
+            removed,
+        )
+        filtered = [
+            event_id for event_id in filtered
+            if event_id not in excluded_event_ids
+        ]
     logger.info('%s 划分: 文件中 %d 个事件，HDF5 可用 %d 个事件', split_name, len(event_ids), len(filtered))
     return filtered
 
@@ -277,7 +294,6 @@ def _sanitize_for_json(obj: Any) -> Any:
 def _extract_core_metrics(metrics: Dict[str, Any]) -> Dict[str, float]:
     all_slots = metrics.get('classification_all_slots', {}) or {}
     activity_binary_all = metrics.get('activity_binary_all_slots', {}) or {}
-    activity_only = metrics.get('classification_activity_only', {}) or {}
     region_iou = metrics.get('region_iou_metrics', {}) or {}
     return {
         'accuracy': float(metrics.get('accuracy', 0.0)),
@@ -285,10 +301,6 @@ def _extract_core_metrics(metrics: Dict[str, Any]) -> Dict[str, float]:
         'recall': float(metrics.get('recall', 0.0)),
         'f1': float(metrics.get('f1', 0.0)),
         'tss': float(metrics.get('tss', 0.0)),
-        'classification_activity_only_precision': float(activity_only.get('macro_precision', metrics.get('precision', 0.0))),
-        'classification_activity_only_recall': float(activity_only.get('macro_recall', metrics.get('recall', 0.0))),
-        'classification_activity_only_f1': float(activity_only.get('macro_f1', metrics.get('f1', 0.0))),
-        'classification_activity_only_tss': float(activity_only.get('macro_tss', metrics.get('tss', 0.0))),
         'classification_all_slots_precision': float(all_slots.get('macro_precision', 0.0)),
         'classification_all_slots_recall': float(all_slots.get('macro_recall', 0.0)),
         'classification_all_slots_f1': float(all_slots.get('macro_f1', 0.0)),
@@ -508,13 +520,13 @@ def _save_results(output_dir: Path, results: Dict[str, Any]) -> None:
     md_path = output_dir / 'evaluation_summary_all_splits.md'
     with open(md_path, 'w', encoding='utf-8') as f:
         f.write('# 模型评估结果汇总\n\n')
-        f.write('| split | num_samples | activity_precision | all_slots_precision | activity_binary_precision | activity_binary_recall | region_precision | region_recall | iou | f1 | tss |\n')
+        f.write('| split | num_samples | class12_precision | all_slots_precision | activity_binary_precision | activity_binary_recall | region_precision | region_recall | iou | f1 | tss |\n')
         f.write('|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|\n')
         for split_name, split_result in results.items():
             m = split_result.get('core_metrics', {})
             f.write(
                 f"| {split_name} | {split_result.get('num_samples', 0)} | "
-                f"{m.get('classification_activity_only_precision', 0.0):.6f} | "
+                f"{m.get('precision', 0.0):.6f} | "
                 f"{m.get('classification_all_slots_precision', 0.0):.6f} | "
                 f"{m.get('activity_binary_all_slots_precision', 0.0):.6f} | "
                 f"{m.get('activity_binary_all_slots_recall', 0.0):.6f} | "
@@ -642,10 +654,10 @@ def main(cli_args=None):
         }
 
         logger.info(
-            '%s | samples=%d | activity_precision=%.4f | all_slots_precision=%.4f | activity_binary_precision=%.4f | activity_binary_recall=%.4f | region_precision=%.4f | iou=%.4f',
+            '%s | samples=%d | class12_precision=%.4f | all_slots_precision=%.4f | activity_binary_precision=%.4f | activity_binary_recall=%.4f | region_precision=%.4f | iou=%.4f',
             split_name,
             len(loader.dataset),
-            core_metrics['classification_activity_only_precision'],
+            core_metrics['precision'],
             core_metrics['classification_all_slots_precision'],
             core_metrics['activity_binary_all_slots_precision'],
             core_metrics['activity_binary_all_slots_recall'],

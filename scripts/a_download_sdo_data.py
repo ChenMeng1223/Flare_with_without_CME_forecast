@@ -620,18 +620,18 @@ class SDODataDownloader:
         # 如果后续需要恢复 HMI 下载，只需删除或注释掉下面对 'magnetogram' 的跳过逻辑。
         for modality, modality_config in self.modalities.items():
             # 跳过 HMI 磁图
-            if modality == 'magnetogram':
-                logger.info("暂时跳过 HMI magnetogram 下载，仅调试 AIA/EUV 等波段")
-                continue
-            if modality == 'euv_94':
-                logger.info("暂时跳过 euv_94 下载，仅调试 AIA/EUV 等波段")
-                continue
-            if modality == 'euv_171':
-                logger.info("暂时跳过 euv_171 下载，仅调试 AIA/EUV 等波段")
-                continue
-            if modality == 'euv_193':
-                logger.info("暂时跳过 euv_193 下载，仅调试 AIA/EUV 等波段")
-                continue
+            # if modality == 'magnetogram':
+            #     logger.info("暂时跳过 HMI magnetogram 下载，仅调试 AIA/EUV 等波段")
+            #     continue
+            # if modality == 'euv_94':
+            #     logger.info("暂时跳过 euv_94 下载，仅调试 AIA/EUV 等波段")
+            #     continue
+            # if modality == 'euv_171':
+            #     logger.info("暂时跳过 euv_171 下载，仅调试 AIA/EUV 等波段")
+            #     continue
+            # if modality == 'euv_193':
+            #     logger.info("暂时跳过 euv_193 下载，仅调试 AIA/EUV 等波段")
+            #     continue
             if modality == 'halpha':
                 logger.info("暂时跳过 halpha 下载，仅调试 AIA/EUV 等波段")
                 continue
